@@ -4,13 +4,14 @@
     <SchemaVersion>2.0</SchemaVersion>
     <ProjectGuid>46c4da40-49cd-4230-8c64-8abe04575e67</ProjectGuid>
     <ProjectHome>.</ProjectHome>
-    <StartupFile>app.py</StartupFile>
+    <StartupFile>frontend\app.py</StartupFile>
     <SearchPath>
     </SearchPath>
     <WorkingDirectory>.</WorkingDirectory>
     <OutputPath>.</OutputPath>
     <Name>valuta_analytics</Name>
     <RootNamespace>valuta_analytics</RootNamespace>
+    <InterpreterId>Global|PythonCore|3.11</InterpreterId>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
@@ -21,20 +22,34 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="app.py" />
-    <Compile Include="database.py">
+    <Compile Include="backend\weather_model.py" />
+    <Compile Include="frontend\app.py" />
+    <Compile Include="backend\api.py">
       <SubType>Code</SubType>
     </Compile>
-    <Compile Include="model.py">
+    <Compile Include="backend\database.py">
       <SubType>Code</SubType>
     </Compile>
-    <Compile Include="scraper.py">
+    <Compile Include="backend\model.py">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="backend\scraper.py">
       <SubType>Code</SubType>
     </Compile>
   </ItemGroup>
   <ItemGroup>
-    <Content Include="Dockerfile" />
-    <Content Include="requirements.txt" />
+    <Content Include="docker-compose.yml" />
+    <Content Include="Dockerfile.backend" />
+    <Content Include="backend\requirements.txt" />
+    <Content Include="Dockerfile.frontend" />
+    <Content Include="frontend\requirements.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <InterpreterReference Include="Global|PythonCore|3.11" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="backend\" />
+    <Folder Include="frontend\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

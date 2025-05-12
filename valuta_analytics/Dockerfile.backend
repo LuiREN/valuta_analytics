@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+# Установка зависимостей для работы с данными и curl для healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libc-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Копируем зависимости
+COPY ./backend/requirements.txt .
+
+# Устанавливаем зависимости
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем код приложения
+COPY ./backend/ .
+
+# Создаем папки для данных и моделей
+RUN mkdir -p models data
+
+# Устанавливаем переменные окружения
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# Открываем порт для API
+EXPOSE 8000
+
+# Запускаем приложение
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

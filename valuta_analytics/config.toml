@@ -1,0 +1,20 @@
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#4F46E5"
+secondaryColor = "#10B981"
+backgroundColor = "#f8f9fa"
+textColor = "#111827"
+
+[server]
+maxUploadSize = 200
+enableCORS = true
+enableXsrfProtection = true
+
+[deprecation]
+showPyplotGlobalUse = false
+
+[logger]
+level = "info"
