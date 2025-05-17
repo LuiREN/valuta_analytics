@@ -1,15 +1,16 @@
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.svm import SVR
-from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from sklearn.linear_model import Ridge
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
-from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
+from sklearn.model_selection import TimeSeriesSplit
 from datetime import datetime, timedelta
 import joblib
 import os
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+import statsmodels.api as sm
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -17,501 +18,574 @@ class ImprovedCurrencyPredictor:
     def __init__(self, model_dir='models'):
         """Инициализация улучшенного предиктора для прогнозирования курсов валют"""
         self.model_dir = model_dir
-        # Создаем директорию для моделей, если она не существует
         if not os.path.exists(model_dir):
             os.makedirs(model_dir)
         
         self.model = None
-        self.scaler = None
+        self.model_type = None
+        self.scaler = StandardScaler()
         self.version = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.metrics = {}  # Словарь для хранения метрик модели
-        self.best_model_type = None  # Тип лучшей модели
-        self.feature_importances = None  # Важность признаков
-        self.is_differenced = False  # Флаг, указывающий, были ли данные дифференцированы
-        self.original_mean = None  # Среднее значение до дифференцирования
-    
-    def check_stationarity(self, df):
-        """Проверка стационарности временного ряда с помощью теста Дики-Фуллера"""
-        result = adfuller(df['value'].values)
-        p_value = result[1]
+        self.metrics = {}
+        self.best_model_type = None
+        self.feature_names = None
+        self.is_differenced = False
+        self.original_mean = None
+        self.data_properties = {}
         
+    def check_stationarity(self, series):
+        """Проверка стационарности временного ряда с помощью теста Дики-Фуллера"""
+        from statsmodels.tsa.stattools import adfuller
+        result = adfuller(series.values)
+        p_value = result[1]
         print(f"P-value: {p_value}")
-        if p_value <= 0.05:
-            print("Временной ряд стационарен (на уровне значимости 5%)")
-            return True
-        else:
-            print("Временной ряд не стационарен, рекомендуется дифференцирование")
-            return False
+        return p_value <= 0.05
     
-    def apply_differencing(self, df):
-        """Применение дифференцирования для обеспечения стационарности"""
-        if len(df) <= 1:
+    def difference_series(self, df):
+        """Применение дифференцирования для достижения стационарности"""
+        if len(df) <= 5:
             return df, False
             
-        # Сохраняем исходное среднее значение для последующего восстановления
+        # Сохраняем оригинальное среднее для восстановления
         self.original_mean = df['value'].mean()
         
-        # Создаем копию, чтобы не изменять исходный df
+        # Создаем копию для работы
         diff_df = df.copy()
         
-        # Рассчитываем разницы (первого порядка)
-        diff_df['value_diff'] = diff_df['value'].diff()
+        # Проверяем, стационарен ли ряд
+        is_stationary = self.check_stationarity(diff_df['value'])
         
-        # Удаляем первую строку с NaN и восстанавливаем исходную дату
-        diff_df = diff_df.dropna().reset_index(drop=True)
-        
-        # Заменяем исходные значения на дифференцированные
-        diff_df['value_original'] = diff_df['value'].copy()
-        diff_df['value'] = diff_df['value_diff']
-        
-        return diff_df, True
-    
-    def identify_outliers(self, df, column='value', method='zscore', threshold=3.0):
-        """Выявление выбросов в данных"""
-        if method == 'zscore':
-            # Z-score метод
-            z_scores = np.abs((df[column] - df[column].mean()) / df[column].std())
-            outliers = df[z_scores > threshold]
-            return outliers, z_scores > threshold
-        elif method == 'iqr':
-            # IQR метод (межквартильный размах)
-            Q1 = df[column].quantile(0.25)
-            Q3 = df[column].quantile(0.75)
-            IQR = Q3 - Q1
-            lower_bound = Q1 - threshold * IQR
-            upper_bound = Q3 + threshold * IQR
-            outliers = df[(df[column] < lower_bound) | (df[column] > upper_bound)]
-            return outliers, (df[column] < lower_bound) | (df[column] > upper_bound)
-        else:
-            raise ValueError("Неизвестный метод обнаружения выбросов")
-    
-    def handle_outliers(self, df, column='value', method='winsorize'):
-        """Обработка выбросов в данных"""
-        # Находим выбросы
-        _, is_outlier = self.identify_outliers(df, column)
-        
-        if not any(is_outlier):
-            return df  # Нет выбросов
+        if not is_stationary:
+            print("Ряд не стационарен, применяем дифференцирование")
+            # Сохраняем оригинальные значения
+            diff_df['value_original'] = diff_df['value'].copy()
             
-        # Создаем копию для изменений
+            # Применяем дифференцирование первого порядка
+            diff_df['value_diff'] = diff_df['value'].diff()
+            diff_df = diff_df.dropna().reset_index(drop=True)
+            diff_df['value'] = diff_df['value_diff']
+            
+            # Проверяем, стал ли ряд стационарным
+            if len(diff_df) > 5:
+                is_stationary_now = self.check_stationarity(diff_df['value'])
+                print(f"После дифференцирования ряд стационарен: {is_stationary_now}")
+            
+            return diff_df, True
+        else:
+            print("Ряд уже стационарен, дифференцирование не требуется")
+            return diff_df, False
+    
+    def decompose_time_series(self, df):
+        """Декомпозиция временного ряда на тренд, сезонность и остаток"""
+        if len(df) < 14:  # Нужно минимум 2 недели данных для декомпозиции
+            print("Недостаточно данных для декомпозиции")
+            return None, None, None
+            
+        try:
+            # Преобразуем 'date' в индекс
+            ts = df.set_index('date')['value']
+            
+            # Разложение временного ряда
+            decomposition = sm.tsa.seasonal_decompose(ts, model='additive', period=7)
+            trend = decomposition.trend
+            seasonal = decomposition.seasonal
+            residual = decomposition.resid
+            
+            print("Временной ряд успешно разложен на компоненты")
+            return trend, seasonal, residual
+        except Exception as e:
+            print(f"Ошибка при декомпозиции временного ряда: {e}")
+            return None, None, None
+    
+    def handle_outliers(self, df, column='value', method='winsorize', threshold=3.0):
+        """Обработка выбросов в данных"""
+        if len(df) <= 5:
+            return df
+            
         clean_df = df.copy()
         
         if method == 'winsorize':
             # Ограничиваем экстремальные значения
-            Q1 = df[column].quantile(0.05)  # 5-й процентиль
-            Q3 = df[column].quantile(0.95)  # 95-й процентиль
-            clean_df.loc[clean_df[column] < Q1, column] = Q1
-            clean_df.loc[clean_df[column] > Q3, column] = Q3
-        elif method == 'mean':
-            # Заменяем выбросы средним значением
-            mean_value = df[~is_outlier][column].mean()
-            clean_df.loc[is_outlier, column] = mean_value
-        elif method == 'median':
-            # Заменяем выбросы медианой
-            median_value = df[~is_outlier][column].median()
-            clean_df.loc[is_outlier, column] = median_value
-        elif method == 'remove':
-            # Удаляем выбросы
-            clean_df = df[~is_outlier].reset_index(drop=True)
+            q05 = np.percentile(clean_df[column], 5)
+            q95 = np.percentile(clean_df[column], 95)
+            clean_df.loc[clean_df[column] < q05, column] = q05
+            clean_df.loc[clean_df[column] > q95, column] = q95
+            print(f"Выбросы обработаны методом winsorize (5-95 персентиль)")
+        elif method == 'iqr':
+            # Использование межквартильного размаха
+            Q1 = clean_df[column].quantile(0.25)
+            Q3 = clean_df[column].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - threshold * IQR
+            upper_bound = Q3 + threshold * IQR
+            clean_df.loc[clean_df[column] < lower_bound, column] = lower_bound
+            clean_df.loc[clean_df[column] > upper_bound, column] = upper_bound
+            print(f"Выбросы обработаны методом IQR с порогом {threshold}")
+        elif method == 'zscore':
+            # Z-score метод
+            z_scores = np.abs((clean_df[column] - clean_df[column].mean()) / clean_df[column].std())
+            clean_df.loc[z_scores > threshold, column] = np.nan
+            clean_df.fillna(clean_df[column].median(), inplace=True)
+            print(f"Выбросы обработаны методом Z-score с порогом {threshold}")
             
         return clean_df
     
-    def _prepare_features(self, df, engineer_features=True):
-        """Улучшенная подготовка признаков для модели"""
-        if df.empty:
-            print("Нет данных для подготовки признаков")
+    def prepare_features(self, df, engineer_features=True):
+        """Подготовка признаков для модели"""
+        if df.empty or len(df) < 5:
+            print("Недостаточно данных для подготовки признаков")
             return None, None, None
         
-        # Базовые признаки как в исходной модели
-        # Создаем признак - день недели
-        df['day_of_week'] = df['date'].dt.dayofweek
+        # Создаем копию DataFrame для обработки
+        processed_df = df.copy()
         
-        # Создаем признаки для тренда
-        df['days_from_start'] = (df['date'] - df['date'].min()).dt.days
+        # Добавляем признаки тренда и сезонности
+        processed_df['days_from_start'] = (processed_df['date'] - processed_df['date'].min()).dt.days
         
-        # Расширяем набор признаков, если разрешено инженерией признаков
+        # Циклические признаки для дня недели и месяца
+        processed_df['day_of_week'] = processed_df['date'].dt.dayofweek
+        processed_df['day_sin'] = np.sin(2 * np.pi * processed_df['day_of_week'] / 7)
+        processed_df['day_cos'] = np.cos(2 * np.pi * processed_df['day_of_week'] / 7)
+        
+        processed_df['month'] = processed_df['date'].dt.month
+        processed_df['month_sin'] = np.sin(2 * np.pi * processed_df['month'] / 12)
+        processed_df['month_cos'] = np.cos(2 * np.pi * processed_df['month'] / 12)
+        
+        # Сезонные признаки (квартал вместо отдельных признаков для сезона)
+        processed_df['quarter'] = processed_df['date'].dt.quarter
+        
+        # Лаги значений (сокращаем до 5 лагов)
+        for i in range(1, min(6, len(processed_df))):
+            processed_df[f'lag_{i}'] = processed_df['value'].shift(i)
+        
+        # Признаки изменения
+        processed_df['return_1d'] = processed_df['value'].pct_change(1)
+        processed_df['return_5d'] = processed_df['value'].pct_change(5) if len(processed_df) >= 6 else 0
+        
+        # Скользящие средние (только если данных достаточно)
+        if len(processed_df) >= 8:
+            processed_df['ma3'] = processed_df['value'].rolling(window=3).mean()
+            processed_df['ma5'] = processed_df['value'].rolling(window=5).mean()
+            processed_df['ewma'] = processed_df['value'].ewm(span=5).mean()  # Экспоненциальное скользящее среднее
+            
+            # Волатильность
+            processed_df['volatility'] = processed_df['value'].rolling(window=5).std()
+        
+        # Удаляем строки с NaN значениями
+        processed_df = processed_df.dropna().reset_index(drop=True)
+        
+        if processed_df.empty:
+            print("После удаления NaN значений не осталось данных")
+            return None, None, None
+        
+        # Выбираем признаки для модели
         if engineer_features:
-            # Циклические признаки для дня недели
-            df['day_sin'] = np.sin(2 * np.pi * df['day_of_week'] / 7)
-            df['day_cos'] = np.cos(2 * np.pi * df['day_of_week'] / 7)
+            features = [
+                'days_from_start', 'day_sin', 'day_cos', 'month_sin', 'month_cos', 
+                'quarter', 'return_1d'
+            ]
             
-            # Признаки месяца
-            df['month'] = df['date'].dt.month
-            df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
-            df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+            # Добавляем лаги
+            lag_features = [f'lag_{i}' for i in range(1, 6) if f'lag_{i}' in processed_df.columns]
+            features.extend(lag_features)
             
-            # Сезонные признаки (зима, весна, лето, осень)
-            df['is_winter'] = ((df['month'] == 12) | (df['month'] <= 2)).astype(int)
-            df['is_spring'] = ((df['month'] >= 3) & (df['month'] <= 5)).astype(int)
-            df['is_summer'] = ((df['month'] >= 6) & (df['month'] <= 8)).astype(int)
-            df['is_autumn'] = ((df['month'] >= 9) & (df['month'] <= 11)).astype(int)
-            
-            # Признаки конца/начала месяца (часто влияют на валютные курсы)
-            df['day_of_month'] = df['date'].dt.day
-            df['end_of_month'] = (df['day_of_month'] >= 25).astype(int)
-            df['start_of_month'] = (df['day_of_month'] <= 5).astype(int)
-            
-            # Квартал
-            df['quarter'] = df['date'].dt.quarter
-            
-            # Дополнительные интегральные признаки на основе временных лагов
-            
-            # Скользящие средние разной глубины
-            if len(df) >= 7:
-                df['ma3'] = df['value'].rolling(window=3).mean()
-                df['ma5'] = df['value'].rolling(window=5).mean()
-                df['ma7'] = df['value'].rolling(window=7).mean()
-            
-            # Скользящие стандартные отклонения (волатильность)
-            if len(df) >= 7:
-                df['volatility3'] = df['value'].rolling(window=3).std()
-                df['volatility7'] = df['value'].rolling(window=7).std()
-            
-            # Объем изменения (разница между максимумом и минимумом)
-            if len(df) >= 5:
-                df['range5'] = df['value'].rolling(window=5).max() - df['value'].rolling(window=5).min()
-            
-            # Моментум (изменение за определенный период)
-            if len(df) >= 5:
-                df['momentum3'] = df['value'] - df['value'].shift(3)
-                df['momentum5'] = df['value'] - df['value'].shift(5)
-            
-            # Направление (положительное или отрицательное изменение)
-            df['direction'] = (df['value'].diff() > 0).astype(int)
-            
-            # Величина изменения
-            df['change'] = df['value'].diff()
-            df['pct_change'] = df['value'].pct_change()
-        
-        # Сдвиги цен для учета предыдущих значений (лаги) - расширенная версия
-        for i in range(1, 10):  # Увеличиваем количество лагов до 9
-            df[f'lag_{i}'] = df['value'].shift(i)
-        
-        # Удаляем строки с NaN значениями (возникают из-за сдвигов)
-        df = df.dropna()
-        
-        # Формируем списки признаков в зависимости от уровня инженерии
-        if engineer_features:
-            base_features = ['day_of_week', 'days_from_start']
-            cyclic_features = ['day_sin', 'day_cos', 'month_sin', 'month_cos']
-            seasonal_features = ['is_winter', 'is_spring', 'is_summer', 'is_autumn']
-            calendar_features = ['end_of_month', 'start_of_month', 'quarter']
-            
-            # Включаем только те признаки, которые были созданы выше
-            ma_features = [col for col in ['ma3', 'ma5', 'ma7'] if col in df.columns]
-            volatility_features = [col for col in ['volatility3', 'volatility7'] if col in df.columns]
-            range_features = [col for col in ['range5'] if col in df.columns]
-            momentum_features = [col for col in ['momentum3', 'momentum5'] if col in df.columns]
-            direction_features = ['direction'] if 'direction' in df.columns else []
-            change_features = [col for col in ['change', 'pct_change'] if col in df.columns]
-            
-            lag_features = [f'lag_{i}' for i in range(1, 10)]
-            
-            # Объединяем все группы признаков
-            features = (
-                base_features + cyclic_features + seasonal_features + calendar_features +
-                ma_features + volatility_features + range_features + momentum_features +
-                direction_features + change_features + lag_features
-            )
+            # Добавляем скользящие средние и волатильность, если они есть
+            if 'ma3' in processed_df.columns:
+                features.extend(['ma3', 'ma5', 'ewma', 'volatility'])
+                
+            if 'return_5d' in processed_df.columns:
+                features.append('return_5d')
         else:
             # Базовый набор признаков
-            features = ['day_of_week', 'days_from_start'] + [f'lag_{i}' for i in range(1, 10)]
+            features = ['days_from_start', 'day_sin', 'day_cos']
+            if 'lag_1' in processed_df.columns:
+                features.append('lag_1')
         
-        # Отфильтровываем признаки, которых может не быть при нехватке данных
-        features = [f for f in features if f in df.columns]
+        # Проверяем, что все выбранные признаки есть в данных
+        features = [f for f in features if f in processed_df.columns]
         
-        # Проверяем на наличие признаков после фильтрации
         if not features:
-            print("После фильтрации не осталось признаков")
+            print("Не удалось подготовить признаки")
             return None, None, None
         
-        X = df[features].values
-        y = df['value'].values
+        # Формируем X и y
+        X = processed_df[features].values
+        y = processed_df['value'].values
         
         return X, y, features
     
-    def evaluate_models(self, X_train, y_train, X_test, y_test):
-        """Обучение и сравнение различных моделей"""
+    def build_arima_model(self, df, order=(5,1,0)):
+        """Построение ARIMA модели"""
+        if len(df) < 10:
+            print("Недостаточно данных для ARIMA модели")
+            return None
+            
+        try:
+            # Создаем временной ряд
+            ts = df.set_index('date')['value']
+            
+            # Пробуем автоматически подобрать параметры
+            import pmdarima as pm
+            arima_auto = pm.auto_arima(
+                ts,
+                start_p=1, start_q=1,
+                max_p=5, max_q=5,
+                d=1,
+                seasonal=True,
+                m=7,  # Недельная сезонность
+                stepwise=True,
+                suppress_warnings=True,
+                error_action='ignore'
+            )
+            
+            best_order = arima_auto.order
+            best_seasonal_order = arima_auto.seasonal_order
+            
+            print(f"Оптимальные параметры ARIMA: {best_order}, сезонные: {best_seasonal_order}")
+            
+            # Создаем модель с найденными параметрами
+            model = SARIMAX(
+                ts, 
+                order=best_order, 
+                seasonal_order=best_seasonal_order,
+                enforce_stationarity=False
+            )
+            
+            results = model.fit(disp=False)
+            print(f"ARIMA модель успешно обучена, AIC: {results.aic}")
+            
+            return results
+        except Exception as e:
+            print(f"Ошибка при построении ARIMA модели: {e}")
+            # Пробуем построить простую ARIMA модель
+            try:
+                model = ARIMA(ts, order=order)
+                results = model.fit()
+                print(f"Базовая ARIMA модель успешно обучена, AIC: {results.aic}")
+                return results
+            except Exception as e2:
+                print(f"Ошибка при построении базовой ARIMA модели: {e2}")
+                return None
+    
+    def train_ml_models(self, X_train, y_train, X_test, y_test):
+        """Обучение и сравнение различных ML моделей"""
         models = {
-            'LinearRegression': LinearRegression(),
             'Ridge': Ridge(alpha=1.0),
-            'Lasso': Lasso(alpha=0.1),
-            'ElasticNet': ElasticNet(alpha=0.1, l1_ratio=0.5),
-            'RandomForest': RandomForestRegressor(n_estimators=100, random_state=42),
-            'GradientBoosting': GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, random_state=42),
-            'SVR': SVR(kernel='rbf', C=1.0, epsilon=0.1)
+            'GradientBoosting': GradientBoostingRegressor(
+                n_estimators=100, 
+                learning_rate=0.1, 
+                max_depth=3,
+                random_state=42
+            )
         }
         
         results = {}
         
-        # Обучаем и оцениваем каждую модель
         for name, model in models.items():
             try:
+                # Обучаем модель
                 model.fit(X_train, y_train)
+                
+                # Делаем прогноз на тестовой выборке
                 y_pred = model.predict(X_test)
                 
-                # Рассчитываем метрики
+                # Считаем метрики
                 metrics = self._calculate_metrics(y_test, y_pred)
                 results[name] = {'model': model, 'metrics': metrics}
                 
                 print(f"Модель {name}:")
                 for metric_name, value in metrics.items():
                     print(f"  {metric_name}: {value}")
-                print()
             except Exception as e:
                 print(f"Ошибка при обучении модели {name}: {e}")
         
-        # Находим лучшую модель по R2
+        if not results:
+            print("Не удалось обучить ни одну модель")
+            return None, None, None
+            
+        # Находим лучшую модель по метрике R2
         best_model_name = max(results, key=lambda x: results[x]['metrics']['r2'])
         best_model = results[best_model_name]['model']
         best_metrics = results[best_model_name]['metrics']
         
-        print(f"\nЛучшая модель: {best_model_name}")
-        print(f"Метрики: {best_metrics}")
+        print(f"Лучшая модель: {best_model_name}, R2: {best_metrics['r2']:.4f}")
         
         return best_model, best_metrics, best_model_name
     
-    def optimize_hyperparameters(self, X_train, y_train, model_type):
-        """Оптимизация гиперпараметров для выбранной модели"""
-        # Создаем разбиение для временных рядов
-        tscv = TimeSeriesSplit(n_splits=5)
-        
-        # Параметры для каждого типа модели
-        param_grids = {
-            'LinearRegression': {},  # Нет гиперпараметров для оптимизации
-            'Ridge': {
-                'alpha': [0.01, 0.1, 1.0, 10.0, 100.0]
-            },
-            'Lasso': {
-                'alpha': [0.001, 0.01, 0.1, 1.0, 10.0]
-            },
-            'ElasticNet': {
-                'alpha': [0.001, 0.01, 0.1, 1.0],
-                'l1_ratio': [0.1, 0.3, 0.5, 0.7, 0.9]
-            },
-            'RandomForest': {
-                'n_estimators': [50, 100, 200],
-                'max_depth': [None, 10, 20, 30],
-                'min_samples_split': [2, 5, 10]
-            },
-            'GradientBoosting': {
-                'n_estimators': [50, 100, 200],
-                'learning_rate': [0.01, 0.05, 0.1, 0.2],
-                'max_depth': [3, 5, 8]
-            },
-            'SVR': {
-                'C': [0.1, 1.0, 10.0],
-                'epsilon': [0.01, 0.1, 0.2],
-                'kernel': ['linear', 'rbf']
-            }
-        }
-        
-        # Если модель не требует оптимизации или нет заданных параметров
-        if model_type not in param_grids or not param_grids[model_type]:
-            if model_type == 'LinearRegression':
-                return LinearRegression()
-            else:
-                print(f"Нет параметров для оптимизации модели {model_type}")
-                return None
-        
-        # Создаем базовую модель
-        if model_type == 'Ridge':
-            model = Ridge()
-        elif model_type == 'Lasso':
-            model = Lasso()
-        elif model_type == 'ElasticNet':
-            model = ElasticNet()
-        elif model_type == 'RandomForest':
-            model = RandomForestRegressor(random_state=42)
-        elif model_type == 'GradientBoosting':
-            model = GradientBoostingRegressor(random_state=42)
-        elif model_type == 'SVR':
-            model = SVR()
-        else:
-            print(f"Неизвестный тип модели: {model_type}")
-            return None
-        
-        # Выполняем поиск по сетке
-        grid_search = GridSearchCV(
-            model,
-            param_grids[model_type],
-            cv=tscv,
-            scoring='r2',
-            verbose=1,
-            n_jobs=-1
-        )
-        
-        grid_search.fit(X_train, y_train)
-        
-        print(f"Лучшие параметры для {model_type}: {grid_search.best_params_}")
-        print(f"Лучший результат: {grid_search.best_score_:.4f}")
-        
-        return grid_search.best_estimator_
-    
-    def train(self, df, optimize=True, feature_engineering=True, handle_outliers_method=None):
-        """Улучшенное обучение модели на исторических данных"""
-        if df.empty:
-            print("Нет данных для обучения модели")
+    def train(self, df, optimize=True, feature_engineering=True, handle_outliers_method='winsorize'):
+        """Обучение модели на исторических данных"""
+        if df.empty or len(df) < 10:
+            print("Недостаточно данных для обучения модели")
             return False
         
         print(f"Размер исходных данных: {df.shape}")
         
-        # Проверка стационарности
-        is_stationary = self.check_stationarity(df)
+        # Сохраняем оригинальные данные для статистики
+        self.data_properties = {
+            'original_length': len(df),
+            'min_date': df['date'].min().strftime('%Y-%m-%d'),
+            'max_date': df['date'].max().strftime('%Y-%m-%d'),
+            'min_value': df['value'].min(),
+            'max_value': df['value'].max(),
+            'mean_value': df['value'].mean(),
+            'std_value': df['value'].std()
+        }
         
-        # Применение дифференцирования, если ряд не стационарен
-        if not is_stationary and len(df) > 10:  # Минимальный размер для дифференцирования
-            print("Применение дифференцирования для обеспечения стационарности")
-            df, is_differenced = self.apply_differencing(df)
-            self.is_differenced = is_differenced
-            
-            if is_differenced:
-                print(f"Размер данных после дифференцирования: {df.shape}")
-        
-        # Обработка выбросов, если указан метод
+        # Обработка выбросов
         if handle_outliers_method:
-            print(f"Обработка выбросов методом {handle_outliers_method}")
             df = self.handle_outliers(df, 'value', handle_outliers_method)
-            print(f"Размер данных после обработки выбросов: {df.shape}")
         
-        # Разделяем данные на обучающую и тестовую выборки (80/20)
-        train_size = int(len(df) * 0.8)
-        df_train = df.iloc[:train_size].copy()
-        df_test = df.iloc[train_size:].copy()
+        # Дифференцирование, если необходимо
+        df, self.is_differenced = self.difference_series(df)
         
-        print(f"Размер обучающей выборки: {df_train.shape}")
-        print(f"Размер тестовой выборки: {df_test.shape}")
+        # Декомпозиция временного ряда для анализа
+        trend, seasonal, residual = self.decompose_time_series(df)
         
-        # Подготовка признаков для обучения с расширенным набором
-        X_train, y_train, features = self._prepare_features(df_train, engineer_features=feature_engineering)
-        
-        if X_train is None:
-            print("Не удалось подготовить признаки для обучения")
-            return False
-        
-        print(f"Количество признаков: {len(features)}")
-        print(f"Признаки: {features}")
-        
-        # Нормализация данных
-        self.scaler = StandardScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        
-        # Оценка на тестовой выборке, если есть достаточно данных
-        if len(df_test) > 5:
-            X_test, y_test, _ = self._prepare_features(df_test, engineer_features=feature_engineering)
+        # Выбираем метод обучения в зависимости от данных
+        if len(df) >= 30:  # Достаточно данных для ARIMA и ML
+            print("Используем комбинированный подход: ARIMA + ML")
+            
+            # Разделяем данные на обучающую и тестовую выборки (80/20)
+            train_size = int(len(df) * 0.8)
+            df_train = df.iloc[:train_size].copy()
+            df_test = df.iloc[train_size:].copy()
+            
+            # 1. Строим ARIMA модель
+            arima_model = self.build_arima_model(df_train)
+            
+            # 2. Подготавливаем ML модель
+            X_train, y_train, features = self.prepare_features(df_train, engineer_features=feature_engineering)
+            
+            if X_train is None:
+                print("Не удалось подготовить признаки для ML модели")
+                # Пробуем использовать только ARIMA
+                if arima_model is not None:
+                    self.model = arima_model
+                    self.model_type = 'ARIMA'
+                    self.best_model_type = 'ARIMA'
+                    
+                    # Оцениваем модель на тестовых данных
+                    test_ts = df_test.set_index('date')['value']
+                    arima_forecast = arima_model.get_forecast(steps=len(df_test))
+                    y_pred = arima_forecast.predicted_mean.values
+                    
+                    # Рассчитываем метрики
+                    self.metrics = self._calculate_metrics(test_ts.values, y_pred)
+                    print("Используем только ARIMA модель")
+                    print(f"Метрики ARIMA: {self.metrics}")
+                    
+                    self._save_model(features=[])
+                    return True
+                else:
+                    print("Не удалось создать ни ARIMA, ни ML модель")
+                    return False
+            
+            # Нормализуем признаки
+            self.scaler = StandardScaler()
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            
+            # Подготавливаем тестовые данные для ML
+            X_test, y_test, _ = self.prepare_features(df_test, engineer_features=feature_engineering)
             
             if X_test is None:
-                print("Не удалось подготовить признаки для тестирования")
+                print("Не удалось подготовить тестовые данные")
                 return False
                 
             X_test_scaled = self.scaler.transform(X_test)
             
-            # Сравнение различных моделей
-            print("Сравнение различных моделей:")
-            best_model, best_metrics, best_model_name = self.evaluate_models(
-                X_train_scaled, y_train, X_test_scaled, y_test
-            )
+            # Обучаем ML модели
+            ml_model, ml_metrics, ml_model_name = self.train_ml_models(X_train_scaled, y_train, X_test_scaled, y_test)
             
-            if optimize and best_model_name != 'LinearRegression':
-                print(f"Оптимизация гиперпараметров для модели {best_model_name}")
-                optimized_model = self.optimize_hyperparameters(X_train_scaled, y_train, best_model_name)
-                
-                if optimized_model:
-                    # Проверяем, лучше ли оптимизированная модель
-                    y_pred = optimized_model.predict(X_test_scaled)
-                    optimized_metrics = self._calculate_metrics(y_test, y_pred)
+            if ml_model is None:
+                if arima_model is not None:
+                    # Используем только ARIMA
+                    self.model = arima_model
+                    self.model_type = 'ARIMA'
+                    self.best_model_type = 'ARIMA'
                     
-                    print(f"Метрики оптимизированной модели: {optimized_metrics}")
-                    print(f"Метрики базовой модели: {best_metrics}")
+                    # Оцениваем ARIMA на тесте
+                    test_ts = df_test.set_index('date')['value']
+                    arima_forecast = arima_model.get_forecast(steps=len(df_test))
+                    y_pred = arima_forecast.predicted_mean.values
                     
-                    if optimized_metrics['r2'] > best_metrics['r2']:
-                        print("Оптимизированная модель лучше, используем её")
-                        self.model = optimized_model
-                        self.metrics = optimized_metrics
-                    else:
-                        print("Базовая модель лучше, используем её")
-                        self.model = best_model
-                        self.metrics = best_metrics
+                    self.metrics = self._calculate_metrics(test_ts.values, y_pred)
+                    print(f"Метрики ARIMA: {self.metrics}")
                 else:
-                    self.model = best_model
-                    self.metrics = best_metrics
+                    print("Не удалось создать модели")
+                    return False
             else:
-                self.model = best_model
-                self.metrics = best_metrics
-            
-            self.best_model_type = best_model_name
-            
-            # Сохраняем данные о важности признаков, если модель поддерживает это
-            if hasattr(self.model, 'feature_importances_'):
-                self.feature_importances = dict(zip(features, self.model.feature_importances_))
-                # Выводим самые важные признаки
-                print("\nВажность признаков:")
-                for feature, importance in sorted(self.feature_importances.items(), key=lambda x: x[1], reverse=True):
-                    print(f"{feature}: {importance:.4f}")
-            
-            # Вывод метрик модели
-            print("\nМетрики лучшей модели:")
-            for metric_name, value in self.metrics.items():
-                print(f"{metric_name}: {value}")
-                
+                # У нас есть и ARIMA и ML модель
+                if arima_model is not None:
+                    # Оцениваем ARIMA на тесте
+                    test_ts = df_test.set_index('date')['value']
+                    arima_forecast = arima_model.get_forecast(steps=len(df_test))
+                    arima_pred = arima_forecast.predicted_mean.values
+                    
+                    arima_metrics = self._calculate_metrics(test_ts.values, arima_pred)
+                    print(f"Метрики ARIMA: {arima_metrics}")
+                    
+                    # Сравниваем метрики ARIMA и ML
+                    if arima_metrics['r2'] > ml_metrics['r2']:
+                        print("ARIMA модель показала лучшие результаты")
+                        self.model = arima_model
+                        self.model_type = 'ARIMA'
+                        self.best_model_type = 'ARIMA'
+                        self.metrics = arima_metrics
+                    else:
+                        print("ML модель показала лучшие результаты")
+                        self.model = ml_model
+                        self.model_type = 'ML'
+                        self.best_model_type = ml_model_name
+                        self.metrics = ml_metrics
+                        self.feature_names = features
+                else:
+                    # Используем только ML модель
+                    self.model = ml_model
+                    self.model_type = 'ML'
+                    self.best_model_type = ml_model_name
+                    self.metrics = ml_metrics
+                    self.feature_names = features
         else:
-            # Если недостаточно данных для тестирования, используем кросс-валидацию
-            print("Недостаточно данных для тестовой выборки, используем обучающую выборку")
+            # Недостаточно данных для ARIMA, используем только ML
+            print("Недостаточно данных для ARIMA, используем только ML")
             
-            # Обучаем простую модель
-            self.model = LinearRegression()
-            self.model.fit(X_train_scaled, y_train)
+            # Разделяем данные на обучающую и тестовую выборки
+            train_size = max(int(len(df) * 0.8), len(df) - 3)  # Оставляем минимум 3 точки для теста
+            df_train = df.iloc[:train_size].copy()
+            df_test = df.iloc[train_size:].copy() if train_size < len(df) else None
             
-            # Оценка на обучающей выборке (для справки)
-            y_pred = self.model.predict(X_train_scaled)
-            self.metrics = self._calculate_metrics(y_train, y_pred)
-            self.best_model_type = 'LinearRegression'
+            # Подготавливаем признаки
+            X_train, y_train, features = self.prepare_features(df_train, engineer_features=feature_engineering)
             
-            print("\nМетрики модели (на обучающих данных):")
-            for metric_name, value in self.metrics.items():
-                print(f"{metric_name}: {value}")
+            if X_train is None:
+                print("Не удалось подготовить признаки")
+                return False
+                
+            # Нормализуем признаки
+            self.scaler = StandardScaler()
+            X_train_scaled = self.scaler.fit_transform(X_train)
+            
+            # Для очень малых выборок используем Ridge регрессию
+            if len(df) < 20:
+                print("Малая выборка, используем Ridge регрессию")
+                model = Ridge(alpha=1.0)
+                model.fit(X_train_scaled, y_train)
+                
+                self.model = model
+                self.model_type = 'ML'
+                self.best_model_type = 'Ridge'
+                self.feature_names = features
+                
+                if df_test is not None and not df_test.empty:
+                    # Оцениваем на тестовых данных
+                    X_test, y_test, _ = self.prepare_features(df_test, engineer_features=feature_engineering)
+                    
+                    if X_test is not None:
+                        X_test_scaled = self.scaler.transform(X_test)
+                        y_pred = model.predict(X_test_scaled)
+                        self.metrics = self._calculate_metrics(y_test, y_pred)
+                    else:
+                        # Оцениваем на обучающих данных
+                        y_pred = model.predict(X_train_scaled)
+                        self.metrics = self._calculate_metrics(y_train, y_pred)
+                        print("Внимание: метрики рассчитаны на обучающей выборке")
+                else:
+                    # Оцениваем на обучающих данных
+                    y_pred = model.predict(X_train_scaled)
+                    self.metrics = self._calculate_metrics(y_train, y_pred)
+                    print("Внимание: метрики рассчитаны на обучающей выборке")
+            else:
+                # Достаточно данных для ML, но не для ARIMA
+                if df_test is not None and not df_test.empty:
+                    X_test, y_test, _ = self.prepare_features(df_test, engineer_features=feature_engineering)
+                    
+                    if X_test is not None:
+                        X_test_scaled = self.scaler.transform(X_test)
+                        
+                        # Обучаем и сравниваем модели
+                        ml_model, ml_metrics, ml_model_name = self.train_ml_models(X_train_scaled, y_train, X_test_scaled, y_test)
+                        
+                        if ml_model is not None:
+                            self.model = ml_model
+                            self.model_type = 'ML'
+                            self.best_model_type = ml_model_name
+                            self.metrics = ml_metrics
+                            self.feature_names = features
+                        else:
+                            # Используем простую Ridge регрессию
+                            model = Ridge(alpha=1.0)
+                            model.fit(X_train_scaled, y_train)
+                            
+                            y_pred = model.predict(X_test_scaled)
+                            self.model = model
+                            self.model_type = 'ML'
+                            self.best_model_type = 'Ridge'
+                            self.metrics = self._calculate_metrics(y_test, y_pred)
+                            self.feature_names = features
+                    else:
+                        # Не удалось подготовить тестовые данные
+                        model = Ridge(alpha=1.0)
+                        model.fit(X_train_scaled, y_train)
+                        
+                        self.model = model
+                        self.model_type = 'ML'
+                        self.best_model_type = 'Ridge'
+                        self.feature_names = features
+                        
+                        # Оцениваем на обучающих данных
+                        y_pred = model.predict(X_train_scaled)
+                        self.metrics = self._calculate_metrics(y_train, y_pred)
+                        print("Внимание: метрики рассчитаны на обучающей выборке")
+                else:
+                    # Используем Ridge регрессию и оцениваем на обучающей выборке
+                    model = Ridge(alpha=1.0)
+                    model.fit(X_train_scaled, y_train)
+                    
+                    self.model = model
+                    self.model_type = 'ML'
+                    self.best_model_type = 'Ridge'
+                    self.feature_names = features
+                    
+                    # Оцениваем на обучающих данных
+                    y_pred = model.predict(X_train_scaled)
+                    self.metrics = self._calculate_metrics(y_train, y_pred)
+                    print("Внимание: метрики рассчитаны на обучающей выборке")
         
-        # Сохранение модели и связанных данных
+        # Сохраняем модель
         self._save_model(features)
         
         print(f"Модель обучена и сохранена: {os.path.join(self.model_dir, f'model_{self.version}.joblib')}")
+        print(f"Тип модели: {self.model_type}, подтип: {self.best_model_type}")
+        print(f"Метрики: {self.metrics}")
+        
         return True
     
     def _calculate_metrics(self, y_true, y_pred):
-        """Расчет расширенного набора метрик качества модели"""
+        """Расчет метрик качества модели"""
         metrics = {}
         
-        # R-квадрат (коэффициент детерминации)
+        # R-квадрат
         metrics['r2'] = r2_score(y_true, y_pred)
         
-        # Средняя абсолютная ошибка (MAE)
+        # MAE
         metrics['mae'] = mean_absolute_error(y_true, y_pred)
         
-        # Корень из среднеквадратичной ошибки (RMSE)
+        # RMSE
         metrics['rmse'] = np.sqrt(mean_squared_error(y_true, y_pred))
         
-        # Средняя процентная ошибка (MAPE)
-        # Избегаем деления на ноль
+        # MAPE
         mask = y_true != 0
         if any(mask):
             metrics['mape'] = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100
         else:
             metrics['mape'] = float('inf')
         
-        # Средняя относительная ошибка (MRE)
+        # MRE
         metrics['mre'] = np.mean(np.abs(y_true - y_pred) / np.mean(y_true)) * 100
-        
-        # Средняя ошибка (ME) - смещение
-        metrics['me'] = np.mean(y_true - y_pred)
-        
-        # Максимальная ошибка
-        metrics['max_error'] = np.max(np.abs(y_true - y_pred))
         
         return metrics
     
     def _save_model(self, features):
-        """Сохранение модели и всех связанных данных"""
-        # Создаем директорию, если её нет
+        """Сохранение модели и связанных данных"""
         if not os.path.exists(self.model_dir):
             os.makedirs(self.model_dir)
         
@@ -519,69 +593,112 @@ class ImprovedCurrencyPredictor:
         model_path = os.path.join(self.model_dir, f"model_{self.version}.joblib")
         scaler_path = os.path.join(self.model_dir, f"scaler_{self.version}.joblib")
         metrics_path = os.path.join(self.model_dir, f"metrics_{self.version}.joblib")
-        features_path = os.path.join(self.model_dir, f"features_{self.version}.joblib")
         metadata_path = os.path.join(self.model_dir, f"metadata_{self.version}.joblib")
         
-        # Сохраняем модель и стандартизатор
+        # Сохраняем модель
         joblib.dump(self.model, model_path)
-        joblib.dump(self.scaler, scaler_path)
+        
+        # Сохраняем скалер, если это ML модель
+        if self.model_type == 'ML':
+            joblib.dump(self.scaler, scaler_path)
         
         # Сохраняем метрики
         joblib.dump(self.metrics, metrics_path)
         
-        # Сохраняем список признаков
-        joblib.dump(features, features_path)
-        
         # Сохраняем метаданные
         metadata = {
             'version': self.version,
-            'model_type': self.best_model_type,
-            'feature_importances': self.feature_importances,
+            'model_type': self.model_type,
+            'best_model_type': self.best_model_type,
+            'features': features,
             'is_differenced': self.is_differenced,
             'original_mean': self.original_mean,
+            'data_properties': self.data_properties,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
+        
         joblib.dump(metadata, metadata_path)
     
     def predict_next_days(self, df, days=7):
-        """Улучшенное прогнозирование курса на следующие n дней"""
-        if self.model is None or df.empty:
-            print("Модель не обучена или нет данных для прогноза")
+        """Прогнозирование курса на следующие n дней"""
+        if self.model is None:
+            print("Модель не обучена")
+            return pd.DataFrame()
+            
+        if df.empty or len(df) < 5:
+            print("Недостаточно данных для прогноза")
             return pd.DataFrame()
         
-        # Загружаем признаки если они были сохранены
-        features_path = os.path.join(self.model_dir, f"features_{self.version}.joblib")
-        metadata_path = os.path.join(self.model_dir, f"metadata_{self.version}.joblib")
-        
-        if os.path.exists(features_path):
-            features = joblib.load(features_path)
-        else:
-            # Подготавливаем текущие данные для получения списка признаков
-            _, _, features = self._prepare_features(df)
-            if features is None:
-                print("Ошибка при подготовке признаков для прогноза")
-                return pd.DataFrame()
-        
-        # Загружаем метаданные если они были сохранены
-        if os.path.exists(metadata_path):
-            metadata = joblib.load(metadata_path)
-            is_differenced = metadata.get('is_differenced', False)
-            original_mean = metadata.get('original_mean', None)
-        else:
-            is_differenced = self.is_differenced
-            original_mean = self.original_mean
-        
-        # Применяем дифференцирование к данным, если оно использовалось при обучении
-        if is_differenced:
-            print("Применение дифференцирования для прогноза")
-            df, _ = self.apply_differencing(df)
-        
-        # Будем прогнозировать на указанное количество дней вперед
+        # Получаем последнюю дату из данных
         last_date = df['date'].max()
         future_dates = [last_date + timedelta(days=i+1) for i in range(days)]
         
+        # Разные методы прогнозирования в зависимости от типа модели
+        if self.model_type == 'ARIMA':
+            return self._predict_arima(df, future_dates)
+        else:  # ML модель
+            return self._predict_ml(df, future_dates)
+    
+    def _predict_arima(self, df, future_dates):
+        """Прогноз с использованием ARIMA модели"""
+        try:
+            # Устанавливаем индекс для временного ряда
+            ts = df.set_index('date')['value']
+            
+            # Делаем прогноз на нужное количество дней
+            forecast = self.model.get_forecast(steps=len(future_dates))
+            predictions = forecast.predicted_mean
+            
+            # Формируем результат
+            result_df = pd.DataFrame({
+                'date': future_dates,
+                'predicted_value': predictions.values
+            })
+            
+            # Если использовалось дифференцирование, восстанавливаем значения
+            if self.is_differenced and self.original_mean is not None:
+                # Получаем последнее значение
+                last_value = df['value_original'].iloc[-1] if 'value_original' in df.columns else df['value'].iloc[-1]
+                
+                # Интегрируем дифференцированный ряд
+                for i in range(len(result_df)):
+                    if i == 0:
+                        result_df.loc[i, 'predicted_value'] = last_value + result_df.loc[i, 'predicted_value']
+                    else:
+                        result_df.loc[i, 'predicted_value'] = result_df.loc[i-1, 'predicted_value'] + result_df.loc[i, 'predicted_value']
+            
+            return result_df
+        except Exception as e:
+            print(f"Ошибка при прогнозировании с ARIMA: {e}")
+            return pd.DataFrame()
+    
+    def _predict_ml(self, df, future_dates):
+        """Прогноз с использованием ML модели"""
+        # Загружаем необходимые данные
+        metadata_path = os.path.join(self.model_dir, f"metadata_{self.version}.joblib")
+        
+        if os.path.exists(metadata_path):
+            metadata = joblib.load(metadata_path)
+            features = metadata.get('features', self.feature_names)
+            is_differenced = metadata.get('is_differenced', self.is_differenced)
+            original_mean = metadata.get('original_mean', self.original_mean)
+        else:
+            features = self.feature_names
+            is_differenced = self.is_differenced
+            original_mean = self.original_mean
+        
+        if not features:
+            print("Не удалось получить список признаков")
+            return pd.DataFrame()
+        
+        # Применяем дифференцирование, если оно использовалось при обучении
+        processed_df = df.copy()
+        if is_differenced:
+            processed_df, _ = self.difference_series(processed_df)
+        
+        # Инициализируем DataFrame для результатов
         predictions = []
-        current_data = df.copy()
+        current_data = processed_df.copy()
         
         for future_date in future_dates:
             # Создаем запись для следующего дня
@@ -590,82 +707,77 @@ class ImprovedCurrencyPredictor:
             # Расширяем данные с новой записью
             extended_data = pd.concat([current_data, next_row], ignore_index=True)
             
-            # Подготовка признаков для данных с добавленным следующим днем
-            # Используем инженерию признаков (True)
-            extended_data['day_of_week'] = extended_data['date'].dt.dayofweek
+            # Добавляем необходимые признаки
             extended_data['days_from_start'] = (extended_data['date'] - extended_data['date'].min()).dt.days
+            extended_data['day_of_week'] = extended_data['date'].dt.dayofweek
+            extended_data['day_sin'] = np.sin(2 * np.pi * extended_data['day_of_week'] / 7)
+            extended_data['day_cos'] = np.cos(2 * np.pi * extended_data['day_of_week'] / 7)
             
-            # Добавляем месяц и другие циклические признаки
             extended_data['month'] = extended_data['date'].dt.month
             extended_data['month_sin'] = np.sin(2 * np.pi * extended_data['month'] / 12)
             extended_data['month_cos'] = np.cos(2 * np.pi * extended_data['month'] / 12)
             
-            extended_data['day_sin'] = np.sin(2 * np.pi * extended_data['day_of_week'] / 7)
-            extended_data['day_cos'] = np.cos(2 * np.pi * extended_data['day_of_week'] / 7)
-            
-            # Сезонные признаки
-            extended_data['is_winter'] = ((extended_data['month'] == 12) | (extended_data['month'] <= 2)).astype(int)
-            extended_data['is_spring'] = ((extended_data['month'] >= 3) & (extended_data['month'] <= 5)).astype(int)
-            extended_data['is_summer'] = ((extended_data['month'] >= 6) & (extended_data['month'] <= 8)).astype(int)
-            extended_data['is_autumn'] = ((extended_data['month'] >= 9) & (extended_data['month'] <= 11)).astype(int)
-            
-            # Признаки конца/начала месяца
-            extended_data['day_of_month'] = extended_data['date'].dt.day
-            extended_data['end_of_month'] = (extended_data['day_of_month'] >= 25).astype(int)
-            extended_data['start_of_month'] = (extended_data['day_of_month'] <= 5).astype(int)
-            
-            # Квартал
             extended_data['quarter'] = extended_data['date'].dt.quarter
             
             # Добавляем лаги
-            for i in range(1, 10):
-                extended_data[f'lag_{i}'] = extended_data['value'].shift(i)
+            for i in range(1, 6):
+                if f'lag_{i}' in features:
+                    extended_data[f'lag_{i}'] = extended_data['value'].shift(i)
             
-            # Добавляем скользящие средние, если достаточно данных
-            if len(extended_data) >= 7:
+            # Добавляем изменения
+            if 'return_1d' in features:
+                extended_data['return_1d'] = extended_data['value'].pct_change(1)
+            if 'return_5d' in features:
+                extended_data['return_5d'] = extended_data['value'].pct_change(5)
+            
+            # Добавляем скользящие средние
+            if 'ma3' in features and len(extended_data) >= 3:
                 extended_data['ma3'] = extended_data['value'].rolling(window=3).mean()
+            if 'ma5' in features and len(extended_data) >= 5:
                 extended_data['ma5'] = extended_data['value'].rolling(window=5).mean()
-                extended_data['ma7'] = extended_data['value'].rolling(window=7).mean()
-                
-                extended_data['volatility3'] = extended_data['value'].rolling(window=3).std()
-                extended_data['volatility7'] = extended_data['value'].rolling(window=7).std()
-                
-                if len(extended_data) >= 5:
-                    extended_data['range5'] = extended_data['value'].rolling(window=5).max() - extended_data['value'].rolling(window=5).min()
-                    
-                    extended_data['momentum3'] = extended_data['value'] - extended_data['value'].shift(3)
-                    extended_data['momentum5'] = extended_data['value'] - extended_data['value'].shift(5)
+            if 'ewma' in features and len(extended_data) >= 5:
+                extended_data['ewma'] = extended_data['value'].ewm(span=5).mean()
             
-            # Изменения
-            extended_data['change'] = extended_data['value'].diff()
-            extended_data['pct_change'] = extended_data['value'].pct_change()
-            extended_data['direction'] = (extended_data['value'].diff() > 0).astype(int)
+            # Добавляем волатильность
+            if 'volatility' in features and len(extended_data) >= 5:
+                extended_data['volatility'] = extended_data['value'].rolling(window=5).std()
             
             # Получаем значения признаков для прогнозируемого дня
-            # Отфильтровываем только те признаки, которые были использованы при обучении
+            # Используем только те признаки, которые были при обучении
             available_features = [f for f in features if f in extended_data.columns]
             
-            # Проверяем, что у нас есть все необходимые признаки
-            if len(available_features) < len(features):
+            # Проверяем, что есть все необходимые признаки
+            if set(available_features) != set(features):
                 missing_features = set(features) - set(available_features)
-                print(f"Предупреждение: отсутствуют некоторые признаки: {missing_features}")
+                print(f"Предупреждение: отсутствуют признаки {missing_features}")
+                
+                # Добавляем отсутствующие признаки с нулевыми значениями
+                for feature in missing_features:
+                    extended_data[feature] = 0
+                
+                # Обновляем список доступных признаков
+                available_features = features
             
-            # Выбираем последнюю строку для прогноза
+            # Проверяем, что последняя строка не содержит NaN
+            last_row = extended_data.iloc[-1]
+            if last_row[available_features].isnull().any():
+                print("Предупреждение: в данных есть NaN значения")
+                
+                # Заполняем NaN значения средними
+                for feature in available_features:
+                    if pd.isnull(last_row[feature]):
+                        extended_data.loc[extended_data.index[-1], feature] = extended_data[feature].mean()
+            
+            # Получаем признаки для прогноза
             X_next = extended_data.iloc[-1][available_features].values.reshape(1, -1)
             
-            # Если не хватает признаков, дополняем нулями
-            if X_next.shape[1] < len(features):
-                X_next_full = np.zeros((1, len(features)))
-                X_next_full[:, :X_next.shape[1]] = X_next
-                X_next = X_next_full
-            
-            # Стандартизация признаков
+            # Нормализуем признаки
             X_next_scaled = self.scaler.transform(X_next)
             
             # Делаем прогноз
             prediction = self.model.predict(X_next_scaled)[0]
             
-            # Если использовалось дифференцирование, восстанавливаем оригинальное значение
+            # Если использовалось дифференцирование, восстанавливаем оригинальные значения
             if is_differenced and original_mean is not None:
                 # Для первого прогноза используем последнее значение из исходных данных
                 if len(predictions) == 0:
@@ -688,7 +800,7 @@ class ImprovedCurrencyPredictor:
         return pd.DataFrame(predictions)
     
     def load_model(self, version=None):
-        """Загрузка сохраненной модели по версии"""
+        """Загрузка сохраненной модели"""
         if version is None:
             # Если версия не указана, ищем последнюю
             model_files = [f for f in os.listdir(self.model_dir) if f.startswith("model_")]
@@ -700,34 +812,45 @@ class ImprovedCurrencyPredictor:
             version = model_files[0].replace("model_", "").replace(".joblib", "")
         
         model_path = os.path.join(self.model_dir, f"model_{version}.joblib")
-        scaler_path = os.path.join(self.model_dir, f"scaler_{version}.joblib")
-        metrics_path = os.path.join(self.model_dir, f"metrics_{version}.joblib")
-        features_path = os.path.join(self.model_dir, f"features_{version}.joblib")
         metadata_path = os.path.join(self.model_dir, f"metadata_{version}.joblib")
+        metrics_path = os.path.join(self.model_dir, f"metrics_{version}.joblib")
         
-        if not os.path.exists(model_path) or not os.path.exists(scaler_path):
-            print(f"Файлы модели версии {version} не найдены")
+        if not os.path.exists(model_path):
+            print(f"Модель версии {version} не найдена")
             return False
         
+        # Загружаем модель
         self.model = joblib.load(model_path)
-        self.scaler = joblib.load(scaler_path)
         self.version = version
         
-        # Загружаем метрики, если они есть
+        # Загружаем метаданные если есть
+        if os.path.exists(metadata_path):
+            metadata = joblib.load(metadata_path)
+            self.model_type = metadata.get('model_type', 'ML')
+            self.best_model_type = metadata.get('best_model_type', 'Unknown')
+            self.feature_names = metadata.get('features', [])
+            self.is_differenced = metadata.get('is_differenced', False)
+            self.original_mean = metadata.get('original_mean', None)
+            self.data_properties = metadata.get('data_properties', {})
+        else:
+            self.model_type = 'ML'
+            self.best_model_type = 'Unknown'
+        
+        # Загружаем скалер если это ML модель
+        if self.model_type == 'ML':
+            scaler_path = os.path.join(self.model_dir, f"scaler_{version}.joblib")
+            if os.path.exists(scaler_path):
+                self.scaler = joblib.load(scaler_path)
+            else:
+                print("Предупреждение: файл скалера не найден")
+        
+        # Загружаем метрики
         if os.path.exists(metrics_path):
             self.metrics = joblib.load(metrics_path)
         else:
             self.metrics = {}
         
-        # Загружаем метаданные, если они есть
-        if os.path.exists(metadata_path):
-            metadata = joblib.load(metadata_path)
-            self.best_model_type = metadata.get('model_type')
-            self.feature_importances = metadata.get('feature_importances')
-            self.is_differenced = metadata.get('is_differenced', False)
-            self.original_mean = metadata.get('original_mean')
-        
-        print(f"Загружена модель версии {version}")
+        print(f"Загружена модель версии {version}, тип: {self.model_type}, подтип: {self.best_model_type}")
         return True
     
     def get_model_version(self):
@@ -739,12 +862,13 @@ class ImprovedCurrencyPredictor:
         return self.metrics
     
     def get_model_info(self):
-        """Получение подробной информации о модели"""
-        info = {
+        """Получение информации о модели"""
+        return {
             'version': self.version,
-            'model_type': self.best_model_type,
+            'model_type': self.model_type,
+            'best_model_type': self.best_model_type,
             'metrics': self.metrics,
-            'feature_importances': self.feature_importances,
-            'is_differenced': self.is_differenced
+            'features': self.feature_names,
+            'is_differenced': self.is_differenced,
+            'data_properties': self.data_properties
         }
-        return info

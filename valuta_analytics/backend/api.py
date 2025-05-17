@@ -38,6 +38,8 @@ class PredictionData(BaseModel):
 class PredictionResponse(BaseModel):
     predictions: List[PredictionData]
     model_version: str
+    model_metrics: Optional[Dict[str, float]] = None
+    model_type: Optional[str] = None
     
 class StatisticsData(BaseModel):
     current_rate: float
@@ -246,10 +248,16 @@ def predict_currency(currency_code: str, days: int = Query(7, ge=1, le=30)):
             change_percent=float(change_percent)
         ))
     
-    return PredictionResponse(
-        predictions=result,
-        model_version=predictor.get_model_version()
-    )
+    # Получаем метрики модели для добавления в ответ
+    model_metrics = predictor.get_model_metrics()
+    
+    # Обновляем класс PredictionResponse, чтобы включить метрики модели
+    return {
+        "predictions": result,
+        "model_version": predictor.get_model_version(),
+        "model_metrics": model_metrics,
+        "model_type": predictor.best_model_type
+    }
 
 @app.post("/data/update/current")
 def update_current_data():
@@ -265,7 +273,11 @@ def update_current_data():
         return {"status": "error", "message": f"Ошибка при загрузке данных: {str(e)}"}
 
 @app.post("/data/update/historical")
-def update_historical_data(start_date: str, end_date: str = None):
+def update_historical_data(
+    start_date: str, 
+    end_date: str = None, 
+    currencies: List[str] = Query(None, description="Список кодов валют, если не указан - загружаются все")
+):
     """Обновление исторических данных о курсах валют"""
     # Проверка, что end_date не в будущем
     if end_date is None:
@@ -290,12 +302,29 @@ def update_historical_data(start_date: str, end_date: str = None):
         if start_date_obj > end_date_obj:
             start_date, end_date = end_date, start_date
         
+        # Получаем исторические данные
         historical_data = scraper.get_historical_rates(start_date, end_date)
         if not historical_data:
             return {"status": "warning", "message": "Не удалось загрузить исторические данные. Возможно, API ЦБ РФ недоступен или даты неверны."}
         
+        # Если указаны конкретные валюты, фильтруем данные
+        if currencies and len(currencies) > 0:
+            historical_data = [
+                data for data in historical_data 
+                if data['currency_code'] in currencies
+            ]
+            
+            if not historical_data:
+                return {"status": "warning", "message": "Не найдены данные для указанных валют в выбранном периоде"}
+        
+        # Сохраняем отфильтрованные данные
         db.save_currency_data(historical_data)
-        return {"status": "success", "message": f"Исторические данные успешно загружены: {len(historical_data)} записей"}
+        
+        return {
+            "status": "success", 
+            "message": f"Исторические данные успешно загружены: {len(historical_data)} записей" +
+                      (f" для {len(currencies)} валют" if currencies else "")
+        }
     except Exception as e:
         return {"status": "error", "message": f"Ошибка при загрузке данных: {str(e)}"}
 

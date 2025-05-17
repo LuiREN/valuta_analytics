@@ -36,6 +36,13 @@
     <Compile Include="backend\scraper.py">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="tests\conftest.py">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="tests\test_database.py" />
+    <Compile Include="tests\test_model.py">
+      <SubType>Code</SubType>
+    </Compile>
   </ItemGroup>
   <ItemGroup>
     <Content Include="docker-compose.yml" />
@@ -43,6 +50,8 @@
     <Content Include="backend\requirements.txt" />
     <Content Include="Dockerfile.frontend" />
     <Content Include="frontend\requirements.txt" />
+    <Content Include="tests\__pycache__\test_api.cpython-312-pytest-8.3.3.pyc" />
+    <Content Include="tests\__pycache__\test_model.cpython-312-pytest-8.3.3.pyc" />
   </ItemGroup>
   <ItemGroup>
     <InterpreterReference Include="Global|PythonCore|3.11" />
@@ -50,6 +59,8 @@
   <ItemGroup>
     <Folder Include="backend\" />
     <Folder Include="frontend\" />
+    <Folder Include="tests\" />
+    <Folder Include="tests\__pycache__\" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in
